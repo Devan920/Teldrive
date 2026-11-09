@@ -1,0 +1,13 @@
+/* frontend/style.css */
+/* Minimal custom styling – most UI is Tailwind based */
+
+.dropzone:hover {
+  border-color: #60a5fa; /* blue-400 */
+}
+
+.progress-bar {
+  background-color: #3b82f6; /* blue-500 */
+  height: 0.5rem;
+  width: 0%;
+  transition: width 0.3s ease;
+}

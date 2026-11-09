@@ -1,0 +1,9 @@
+{
+  "appId": "com.devu.teldrive",
+  "appName": "TelDrive",
+  "webDir": "frontend",
+  "server": {
+    "url": "http://10.157.94.251:8000",
+    "cleartext": true
+  }
+}
