@@ -17,6 +17,7 @@ from database import (
     get_file,
     list_files,
     delete_file,
+    toggle_star_file,
     create_folder,
     list_folders,
     get_folder,
@@ -51,7 +52,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TelDrive", lifespan=lifespan)
 
-# Serve static directory if it exists
+# Serve static directory if present
 static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
@@ -195,13 +196,24 @@ async def save_file_metadata(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-# File Listing & Single Upload Fallback
+# Toggle Star Route
+@app.post("/files/{file_id}/star")
+@app.post("/toggle-star/{file_id}")
+async def toggle_star(file_id: int):
+    result = await toggle_star_file(file_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="File not found")
+    return {"status": "success", **result}
+
+# File Listing
 @app.get("/files")
 async def get_files(
     search: Optional[str] = Query(None),
-    folder_id: Optional[int] = Query(None)
+    folder_id: Optional[int] = Query(None),
+    is_starred: Optional[bool] = Query(False),
+    all_files: Optional[bool] = Query(False)
 ):
-    rows = await list_files(search, folder_id)
+    rows = await list_files(search=search, folder_id=folder_id, is_starred=is_starred, all_files=all_files)
     files = []
     for r in rows:
         files.append({
@@ -212,6 +224,7 @@ async def get_files(
             "file_size": r["file_size"],
             "folder_id": r.get("folder_id"),
             "total_chunks": r.get("total_chunks", 1),
+            "is_starred": bool(r.get("is_starred", 0)),
             "content_type": guess_content_type(r["file_name"]),
             "uploaded_at": r["uploaded_at"],
         })
@@ -282,7 +295,7 @@ async def upload_file(
 
     return {"results": results, "status": "success"}
 
-# Sequential Chunk Streaming Generator with Connection Pooling
+# Sequential Chunk Streaming Generator
 async def _stream_file_from_telegram(file_id: int, inline: bool):
     record = await get_file(file_id)
     if not record:

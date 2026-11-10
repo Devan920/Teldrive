@@ -28,6 +28,7 @@ async def init_db():
                 folder_id INTEGER DEFAULT NULL,
                 total_chunks INTEGER DEFAULT 1,
                 chunks TEXT DEFAULT '[]',
+                is_starred INTEGER DEFAULT 0,
                 uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(folder_id) REFERENCES folders(id) ON DELETE CASCADE
             )
@@ -42,6 +43,8 @@ async def init_db():
                 await db.execute("ALTER TABLE files ADD COLUMN total_chunks INTEGER DEFAULT 1")
             if "chunks" not in columns:
                 await db.execute("ALTER TABLE files ADD COLUMN chunks TEXT DEFAULT '[]'")
+            if "is_starred" not in columns:
+                await db.execute("ALTER TABLE files ADD COLUMN is_starred INTEGER DEFAULT 0")
 
         await db.commit()
 
@@ -121,11 +124,23 @@ async def add_file(file_name: str, file_id: str, file_size: int, folder_id: int 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "INSERT INTO files (file_name, file_id, file_size, folder_id, total_chunks, chunks) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO files (file_name, file_id, file_size, folder_id, total_chunks, chunks, is_starred) VALUES (?, ?, ?, ?, ?, ?, 0)",
             (file_name, file_id, file_size, folder_id, total_chunks, chunks)
         )
         await db.commit()
         return cursor.lastrowid
+
+async def toggle_star_file(record_id: int) -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT is_starred FROM files WHERE id = ?", (record_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            new_starred = 0 if row["is_starred"] else 1
+            await db.execute("UPDATE files SET is_starred = ? WHERE id = ?", (new_starred, record_id))
+            await db.commit()
+            return {"id": record_id, "is_starred": bool(new_starred)}
 
 async def get_file(record_id: int) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -134,12 +149,18 @@ async def get_file(record_id: int) -> dict:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
-async def list_files(search: str = None, folder_id: int = None) -> list:
+async def list_files(search: str = None, folder_id: int = None, is_starred: bool = False, all_files: bool = False) -> list:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         if search and search.strip():
             query = "SELECT * FROM files WHERE file_name LIKE ? ORDER BY id DESC"
             params = (f"%{search.strip()}%",)
+        elif is_starred:
+            query = "SELECT * FROM files WHERE is_starred = 1 ORDER BY id DESC"
+            params = ()
+        elif all_files:
+            query = "SELECT * FROM files ORDER BY id DESC"
+            params = ()
         elif folder_id is None:
             query = "SELECT * FROM files WHERE folder_id IS NULL ORDER BY id DESC"
             params = ()
