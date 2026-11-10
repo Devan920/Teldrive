@@ -1,4 +1,5 @@
 import os
+import json
 import aiosqlite
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "cloud_storage.db")
@@ -25,16 +26,22 @@ async def init_db():
                 file_id TEXT NOT NULL,
                 file_size INTEGER NOT NULL,
                 folder_id INTEGER DEFAULT NULL,
+                total_chunks INTEGER DEFAULT 1,
+                chunks TEXT DEFAULT '[]',
                 uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(folder_id) REFERENCES folders(id) ON DELETE CASCADE
             )
         """)
 
-        # Migration: Add folder_id if not present
+        # Migration: Add missing columns if database existed prior
         async with db.execute("PRAGMA table_info(files)") as cursor:
             columns = [row["name"] for row in await cursor.fetchall()]
             if "folder_id" not in columns:
                 await db.execute("ALTER TABLE files ADD COLUMN folder_id INTEGER DEFAULT NULL")
+            if "total_chunks" not in columns:
+                await db.execute("ALTER TABLE files ADD COLUMN total_chunks INTEGER DEFAULT 1")
+            if "chunks" not in columns:
+                await db.execute("ALTER TABLE files ADD COLUMN chunks TEXT DEFAULT '[]'")
 
         await db.commit()
 
@@ -110,12 +117,12 @@ async def delete_folder(folder_id: int) -> bool:
         await db.commit()
         return cursor.rowcount > 0
 
-async def add_file(file_name: str, file_id: str, file_size: int, folder_id: int = None) -> int:
+async def add_file(file_name: str, file_id: str, file_size: int, folder_id: int = None, total_chunks: int = 1, chunks: str = '[]') -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "INSERT INTO files (file_name, file_id, file_size, folder_id) VALUES (?, ?, ?, ?)",
-            (file_name, file_id, file_size, folder_id)
+            "INSERT INTO files (file_name, file_id, file_size, folder_id, total_chunks, chunks) VALUES (?, ?, ?, ?, ?, ?)",
+            (file_name, file_id, file_size, folder_id, total_chunks, chunks)
         )
         await db.commit()
         return cursor.lastrowid

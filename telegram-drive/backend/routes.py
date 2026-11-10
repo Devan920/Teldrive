@@ -1,4 +1,6 @@
+import json
 import mimetypes
+import traceback
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from typing import List, Optional
@@ -66,6 +68,80 @@ async def api_delete_folder(folder_id: int):
 async def api_breadcrumbs(folder_id: Optional[int] = Query(None)):
     return await get_breadcrumbs(folder_id)
 
+# Chunked Upload
+@router.post("/upload-chunk")
+async def upload_chunk(
+    file: UploadFile = File(...),
+    chunk_index: int = Form(...),
+    total_chunks: int = Form(...),
+    file_uuid: str = Form(...)
+):
+    try:
+        content = await file.read()
+        part_filename = f"{file_uuid}_part_{chunk_index}"
+        tg_url = f"{TELEGRAM_API_URL}/sendDocument"
+
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            files_payload = {"document": (part_filename, content)}
+            data = {"chat_id": TELEGRAM_CHAT_ID}
+            response = await client.post(tg_url, data=data, files=files_payload)
+
+        if response.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Telegram API Rejected Chunk: {response.text}")
+
+        res_json = response.json()
+        if not res_json.get("ok"):
+            raise HTTPException(status_code=502, detail=f"Telegram Error: {res_json.get('description')}")
+
+        msg = res_json.get("result", {})
+        tg_file_id = None
+        if "document" in msg:
+            tg_file_id = msg["document"]["file_id"]
+        elif "photo" in msg:
+            tg_file_id = msg["photo"][-1]["file_id"]
+        elif "audio" in msg:
+            tg_file_id = msg["audio"]["file_id"]
+        elif "video" in msg:
+            tg_file_id = msg["video"]["file_id"]
+
+        if not tg_file_id:
+            raise HTTPException(status_code=500, detail="Could not extract tg_file_id from Telegram response")
+
+        return {
+            "status": "success",
+            "chunk_index": chunk_index,
+            "total_chunks": total_chunks,
+            "tg_file_id": tg_file_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/save-file-metadata")
+async def save_file_metadata(
+    file_name: str = Form(...),
+    file_uuid: str = Form(...),
+    file_size: int = Form(...),
+    total_chunks: int = Form(...),
+    chunks: str = Form(...),
+    folder_id: Optional[int] = Form(None)
+):
+    try:
+        record_id = await add_file(
+            file_name=file_name,
+            file_id=file_uuid,
+            file_size=file_size,
+            folder_id=folder_id,
+            total_chunks=total_chunks,
+            chunks=chunks
+        )
+        return {"status": "success", "id": record_id}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Files
 @router.get("/files")
 async def get_files(
@@ -82,6 +158,7 @@ async def get_files(
             "size": r["file_size"],
             "file_size": r["file_size"],
             "folder_id": r.get("folder_id"),
+            "total_chunks": r.get("total_chunks", 1),
             "content_type": guess_content_type(r["file_name"]),
             "uploaded_at": r["uploaded_at"],
         })
@@ -105,14 +182,12 @@ async def upload_files(
     results = []
     for upload in upload_list:
         content = await upload.read()
-        if len(content) > MAX_FILE_SIZE:
-            results.append({"filename": upload.filename, "error": "Exceeds 50MB limit"})
-            continue
         try:
             doc = await send_document(content, upload.filename, upload.content_type or "application/octet-stream")
             file_id = doc["file_id"]
             file_size = doc.get("file_size", len(content))
-            record_id = await add_file(upload.filename, file_id, file_size, folder_id)
+            chunks_json = json.dumps([file_id])
+            record_id = await add_file(upload.filename, file_id, file_size, folder_id, total_chunks=1, chunks=chunks_json)
             results.append({"filename": upload.filename, "id": record_id, "folder_id": folder_id, "status": "uploaded"})
         except Exception as e:
             results.append({"filename": upload.filename, "error": str(e)})
@@ -123,23 +198,41 @@ async def _stream_file(file_id: int, inline: bool):
     record = await get_file(file_id)
     if not record:
         raise HTTPException(status_code=404, detail="File not found")
-    try:
-        file_path = await get_file_path(record["file_id"])
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
 
     filename = record["file_name"]
+    file_size = record["file_size"]
     content_type = guess_content_type(filename)
     disposition = "inline" if inline else "attachment"
 
+    chunk_list = []
+    if record.get("chunks"):
+        try:
+            chunk_list = json.loads(record["chunks"])
+        except Exception:
+            chunk_list = []
+
+    if not chunk_list:
+        chunk_list = [record["file_id"]]
+
     async def generator():
-        async for chunk in stream_telegram_file(file_path):
-            yield chunk
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            for tg_file_id in chunk_list:
+                resp = await client.get(f"{TELEGRAM_API_URL}/getFile", params={"file_id": tg_file_id})
+                if resp.status_code != 200 or not resp.json().get("ok"):
+                    raise HTTPException(status_code=502, detail="Failed to fetch chunk info from Telegram")
+
+                file_path = resp.json()["result"]["file_path"]
+                download_url = f"{FILE_DOWNLOAD_URL}/{file_path}"
+
+                async with client.stream("GET", download_url) as stream:
+                    async for chunk in stream.aiter_bytes(chunk_size=16384):
+                        yield chunk
 
     headers = {
         "Content-Disposition": f'{disposition}; filename="{filename}"',
         "Content-Type": content_type,
         "Accept-Ranges": "bytes",
+        "Content-Length": str(file_size)
     }
     return StreamingResponse(generator(), media_type=content_type, headers=headers)
 

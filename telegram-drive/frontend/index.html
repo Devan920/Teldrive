@@ -69,6 +69,17 @@
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen font-sans selection:bg-indigo-500/30 selection:text-indigo-200 relative overflow-x-hidden flex flex-col" style="padding-top: env(safe-area-inset-top);">
 
+  <!-- Pull To Refresh Indicator -->
+  <div id="ptrIndicator" class="fixed top-2 left-1/2 -translate-x-1/2 z-50 pointer-events-none opacity-0 transition-all duration-200">
+    <div class="glass-panel px-4 py-2 rounded-full shadow-2xl flex items-center gap-2 border border-white/20 text-xs font-medium text-indigo-300">
+      <svg id="ptrSpinner" class="w-4 h-4 animate-spin text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 20v-5h-5M4 9a9 9 0 0114.85-3.36L20 7M4 17l1.15-1.36A9 9 0 0120 15"/></svg>
+      <span>Pull to refresh</span>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toastContainer" class="fixed top-5 right-5 z-50 flex flex-col gap-2 max-w-sm pointer-events-none"></div>
+
   <!-- Background Glow Accents -->
   <div class="fixed -top-40 -left-40 w-96 h-96 bg-indigo-600/15 rounded-full blur-3xl pointer-events-none"></div>
   <div class="fixed top-1/3 -right-40 w-96 h-96 bg-purple-600/15 rounded-full blur-3xl pointer-events-none"></div>
@@ -82,13 +93,24 @@
         </svg>
       </div>
       <div>
-        <h1 class="text-xl font-bold bg-gradient-to-r from-white via-slate-200 to-indigo-300 bg-clip-text text-transparent">TelDrive</h1>
+        <div class="flex items-center gap-2">
+          <h1 class="text-xl font-bold bg-gradient-to-r from-white via-slate-200 to-indigo-300 bg-clip-text text-transparent">TelDrive</h1>
+          <!-- Live Connection Badge -->
+          <div class="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[10px] font-medium shrink-0">
+            <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
+            <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 -ml-3"></span>
+            <span class="hidden sm:inline">Online</span>
+          </div>
+        </div>
         <p class="text-xs text-slate-400">Telegram Cloud Drive</p>
       </div>
     </div>
 
     <!-- Right Controls -->
     <div class="flex items-center gap-2 sm:gap-3">
+      <button id="btnHeaderRefresh" class="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/5 border border-transparent hover:border-white/10 transition" title="Refresh Drive">
+        <svg id="refreshIcon" class="w-4 h-4 transition-transform duration-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 20v-5h-5M4 9a9 9 0 0114.85-3.36L20 7M4 17l1.15-1.36A9 9 0 0120 15"/></svg>
+      </button>
       <button id="btnNewFolder" class="bg-indigo-600/80 hover:bg-indigo-500 active:scale-95 text-white text-sm font-medium px-3.5 py-2 rounded-xl border border-indigo-400/30 shadow-lg shadow-indigo-500/20 transition-all flex items-center gap-1.5">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
         <span>+ New Folder</span>
@@ -109,6 +131,7 @@
       <svg class="w-5 h-5 text-slate-400 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
       </svg>
+      <label for="searchInput" class="sr-only">Search files</label>
       <input type="text" id="searchInput" placeholder="Search files across drive..." class="flex-1 bg-transparent text-slate-100 placeholder-slate-400 text-sm focus:outline-none" />
       <button id="btnClearSearch" class="hidden text-xs text-slate-400 hover:text-white px-2 py-1 rounded bg-white/5">Clear</button>
     </div>
@@ -130,7 +153,7 @@
       <div class="flex items-center gap-2 overflow-x-auto text-sm" id="breadcrumbContainer">
         <!-- Breadcrumb nodes inserted dynamically -->
       </div>
-      <button id="btnBackFolder" class="hidden text-xs bg-white/5 hover:bg-white/10 text-slate-300 px-3 py-1.5 rounded-lg border border-white/10 flex items-center gap-1 transition">
+      <button id="btnBackFolder" class="hidden text-xs bg-white/5 hover:bg-white/10 text-slate-300 px-3 py-1.5 rounded-lg border border-white/10 flex items-center gap-1 transition shrink-0">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
         <span>Back</span>
       </button>
@@ -165,7 +188,7 @@
         <button id="btnCloseFolderModal" class="text-slate-400 hover:text-white text-xl">&times;</button>
       </div>
       <div>
-        <label class="block text-xs font-medium text-slate-300 mb-1.5">Folder Name</label>
+        <label for="folderNameInput" class="block text-xs font-medium text-slate-300 mb-1.5">Folder Name</label>
         <input type="text" id="folderNameInput" placeholder="e.g. Work Documents" class="w-full bg-slate-900/80 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500/80" />
       </div>
       <div class="flex justify-end gap-2 pt-2">
@@ -227,6 +250,8 @@
     const btnBackFolder = document.getElementById('btnBackFolder');
     const searchInput = document.getElementById('searchInput');
     const btnClearSearch = document.getElementById('btnClearSearch');
+    const btnHeaderRefresh = document.getElementById('btnHeaderRefresh');
+    const refreshIcon = document.getElementById('refreshIcon');
 
     // New Folder Modal
     const btnNewFolder = document.getElementById('btnNewFolder');
@@ -248,6 +273,33 @@
     const btnPreviewDownload = document.getElementById('btnPreviewDownload');
     const btnClosePreview = document.getElementById('btnClosePreview');
 
+    // Toast Notification System
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toastContainer');
+      const toast = document.createElement('div');
+
+      let bgColors = 'bg-slate-900/90 border-slate-700 text-slate-100';
+      let iconSvg = `<svg class="w-4 h-4 text-indigo-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`;
+
+      if (type === 'success') {
+        bgColors = 'bg-slate-900/90 border-emerald-500/50 text-emerald-200';
+        iconSvg = `<svg class="w-4 h-4 text-emerald-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>`;
+      } else if (type === 'error') {
+        bgColors = 'bg-slate-900/90 border-rose-500/50 text-rose-200';
+        iconSvg = `<svg class="w-4 h-4 text-rose-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>`;
+      }
+
+      toast.className = `glass-panel ${bgColors} px-4 py-3 rounded-xl border shadow-xl flex items-center gap-2.5 text-xs font-medium animate-fade-in transition-all duration-300 pointer-events-auto`;
+      toast.innerHTML = `${iconSvg} <span>${message}</span>`;
+
+      container.appendChild(toast);
+
+      setTimeout(() => {
+        toast.classList.add('opacity-0', '-translate-y-2');
+        setTimeout(() => toast.remove(), 300);
+      }, 3000);
+    }
+
     // Formatters
     function formatSize(bytes) {
       if (!bytes || bytes <= 0) return '0 B';
@@ -256,12 +308,28 @@
       return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
     }
 
+    function formatSpeed(bytesPerSec) {
+      if (!bytesPerSec || bytesPerSec <= 0) return '0 KB/s';
+      if (bytesPerSec >= 1024 * 1024) {
+        return (bytesPerSec / (1024 * 1024)).toFixed(1) + ' MB/s';
+      }
+      return (bytesPerSec / 1024).toFixed(0) + ' KB/s';
+    }
+
     // Load Data
     function loadDriveData() {
+      refreshIcon.classList.add('rotate-180');
+      setTimeout(() => refreshIcon.classList.remove('rotate-180'), 600);
+
       loadBreadcrumbs();
       loadFolders();
       loadFiles();
     }
+
+    btnHeaderRefresh.onclick = () => {
+      showToast('Refreshing drive...', 'info');
+      loadDriveData();
+    };
 
     function loadBreadcrumbs() {
       const url = currentFolderId ? `/breadcrumbs?folder_id=${currentFolderId}` : '/breadcrumbs';
@@ -272,7 +340,7 @@
           crumbs.forEach((crumb, index) => {
             const isLast = index === crumbs.length - 1;
             const node = document.createElement('div');
-            node.className = 'flex items-center gap-1.5';
+            node.className = 'flex items-center gap-1.5 shrink-0';
 
             if (crumb.id === null) {
               node.innerHTML = `<button onclick="navigateToFolder(null)" class="hover:text-indigo-400 font-medium ${isLast ? 'text-white' : 'text-slate-400'} flex items-center gap-1">
@@ -280,7 +348,7 @@
                 <span>Home</span>
               </button>`;
             } else {
-              node.innerHTML = `<span class="text-slate-600">/</span>
+              node.innerHTML = `<span class="text-slate-600">&gt;</span>
               <button onclick="navigateToFolder(${crumb.id})" class="hover:text-indigo-400 font-medium ${isLast ? 'text-white font-semibold' : 'text-slate-400'}">
                 ${crumb.name}
               </button>`;
@@ -295,7 +363,8 @@
           } else {
             btnBackFolder.classList.add('hidden');
           }
-        });
+        })
+        .catch(() => {});
     }
 
     function loadFolders() {
@@ -318,6 +387,7 @@
                 if (e.target.closest('.btn-delete-folder')) return;
                 navigateToFolder(f.id);
               };
+              const itemCountText = (f.item_count !== undefined) ? `${f.item_count} ${f.item_count === 1 ? 'item' : 'items'}` : 'Folder';
               card.innerHTML = `
                 <div class="flex items-start justify-between">
                   <div class="w-10 h-10 rounded-xl bg-amber-500/10 flex items-center justify-center text-amber-400 group-hover:scale-105 transition-transform">
@@ -329,7 +399,7 @@
                 </div>
                 <div>
                   <h3 class="text-xs sm:text-sm font-medium text-slate-200 truncate group-hover:text-white">${f.name}</h3>
-                  <p class="text-[10px] text-slate-500">Folder</p>
+                  <p class="text-[10px] text-slate-500">${itemCountText}</p>
                 </div>
               `;
               foldersGrid.appendChild(card);
@@ -338,7 +408,8 @@
           } else {
             foldersSection.classList.add('hidden');
           }
-        });
+        })
+        .catch(() => {});
     }
 
     function loadFiles() {
@@ -393,7 +464,8 @@
             });
             attachFileDeleteHandlers();
           }
-        });
+        })
+        .catch(() => {});
     }
 
     function navigateToFolder(id) {
@@ -407,7 +479,11 @@
           e.stopPropagation();
           const id = btn.dataset.id;
           if (confirm("Delete this folder and its contents?")) {
-            fetch(`/folders/${id}`, { method: 'DELETE' }).then(() => loadDriveData());
+            fetch(`/folders/${id}`, { method: 'DELETE' })
+              .then(() => {
+                showToast("Folder deleted", "info");
+                loadDriveData();
+              });
           }
         };
       });
@@ -419,7 +495,11 @@
           e.stopPropagation();
           const id = btn.dataset.id;
           if (confirm("Delete this file?")) {
-            fetch(`/files/${id}`, { method: 'DELETE' }).then(() => loadDriveData());
+            fetch(`/files/${id}`, { method: 'DELETE' })
+              .then(() => {
+                showToast("File deleted", "info");
+                loadDriveData();
+              });
           }
         };
       });
@@ -451,11 +531,13 @@
         .then(r => r.json())
         .then(() => {
           closeFolderModal();
+          showToast(`Folder "${name}" created`, 'success');
           loadDriveData();
-        });
+        })
+        .catch(() => showToast('Failed to create folder', 'error'));
     };
 
-    // Uploading
+    // Uploading with XHR Progress & Live Network Speed Calculation
     btnUpload.onclick = () => fileInput.click();
     dropzone.onclick = () => fileInput.click();
 
@@ -471,27 +553,94 @@
 
     function handleUploadFiles(files) {
       if (!files || files.length === 0) return;
-      const formData = new FormData();
-      if (currentFolderId) formData.append('folder_id', currentFolderId);
 
-      for (const file of files) {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const formData = new FormData();
         formData.append('files', file);
-        const pDiv = document.createElement('div');
-        pDiv.className = 'glass-panel p-3 rounded-xl flex items-center justify-between text-xs gap-3';
-        pDiv.innerHTML = `<span class="truncate text-slate-200">${file.name}</span><span class="text-indigo-400 font-medium shrink-0 animate-pulse">Uploading...</span>`;
-        progressContainer.appendChild(pDiv);
-      }
+        if (currentFolderId) formData.append('folder_id', currentFolderId);
 
-      fetch('/upload', { method: 'POST', body: formData })
-        .then(r => r.json())
-        .then(res => {
-          progressContainer.innerHTML = '';
-          loadDriveData();
-        })
-        .catch(() => {
-          progressContainer.innerHTML = '';
-          alert('Upload failed');
-        });
+        const pCardId = `pcard-${Date.now()}-${i}`;
+        const pCard = document.createElement('div');
+        pCard.id = pCardId;
+        pCard.className = 'glass-panel p-3.5 rounded-xl space-y-2 border border-white/10 shadow-lg animate-fade-in';
+        pCard.innerHTML = `
+          <div class="flex items-center justify-between text-xs">
+            <span class="font-medium text-slate-200 truncate max-w-[200px] sm:max-w-xs">${file.name}</span>
+            <span id="speed-${pCardId}" class="text-indigo-400 font-mono text-[11px]">0 KB/s</span>
+          </div>
+          <div class="w-full bg-slate-800 rounded-full h-2 overflow-hidden border border-white/5">
+            <div id="bar-${pCardId}" class="bg-gradient-to-r from-indigo-500 to-purple-500 h-full rounded-full transition-all duration-150 w-0"></div>
+          </div>
+          <div class="flex items-center justify-between text-[11px] text-slate-400 font-mono">
+            <span id="bytes-${pCardId}">0 B / ${formatSize(file.size)}</span>
+            <span id="pct-${pCardId}">0%</span>
+          </div>
+        `;
+        progressContainer.appendChild(pCard);
+
+        const xhr = new XMLHttpRequest();
+        let lastLoaded = 0;
+        let lastTime = Date.now();
+
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const percent = Math.round((e.loaded / e.total) * 100);
+            const now = Date.now();
+            const timeDiff = (now - lastTime) / 1000;
+
+            if (timeDiff >= 0.3 || e.loaded === e.total) {
+              const loadedDiff = e.loaded - lastLoaded;
+              const bytesPerSec = timeDiff > 0 ? (loadedDiff / timeDiff) : 0;
+
+              const speedEl = document.getElementById(`speed-${pCardId}`);
+              if (speedEl) speedEl.innerText = formatSpeed(bytesPerSec);
+
+              lastLoaded = e.loaded;
+              lastTime = now;
+            }
+
+            const barEl = document.getElementById(`bar-${pCardId}`);
+            if (barEl) barEl.style.width = `${percent}%`;
+
+            const pctEl = document.getElementById(`pct-${pCardId}`);
+            if (pctEl) pctEl.innerText = `${percent}%`;
+
+            const bytesEl = document.getElementById(`bytes-${pCardId}`);
+            if (bytesEl) bytesEl.innerText = `${formatSize(e.loaded)} / ${formatSize(e.total)}`;
+          }
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            showToast(`Uploaded "${file.name}"`, 'success');
+            setTimeout(() => {
+              const card = document.getElementById(pCardId);
+              if (card) card.remove();
+            }, 1200);
+            loadDriveData();
+          } else {
+            showToast(`Failed to upload "${file.name}"`, 'error');
+            const speedEl = document.getElementById(`speed-${pCardId}`);
+            if (speedEl) {
+              speedEl.innerText = 'Failed';
+              speedEl.className = 'text-rose-400 font-medium text-xs';
+            }
+          }
+        };
+
+        xhr.onerror = () => {
+          showToast(`Error uploading "${file.name}"`, 'error');
+          const speedEl = document.getElementById(`speed-${pCardId}`);
+          if (speedEl) {
+            speedEl.innerText = 'Error';
+            speedEl.className = 'text-rose-400 font-medium text-xs';
+          }
+        };
+
+        xhr.open('POST', '/upload', true);
+        xhr.send(formData);
+      }
     }
 
     // Search
@@ -590,6 +739,7 @@
 
             <!-- Seekbar -->
             <div class="w-full space-y-1">
+              <label for="audioSeek" class="sr-only">Seek position</label>
               <input type="range" id="audioSeek" value="0" max="100" class="w-full accent-amber-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer" />
               <div class="flex justify-between text-[10px] text-slate-400 font-mono">
                 <span id="audioCurTime">00:00</span>
@@ -614,6 +764,7 @@
             <!-- Volume Slider -->
             <div class="flex items-center gap-2 w-full pt-2 border-t border-white/5">
               <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/></svg>
+              <label for="audioVolume" class="sr-only">Volume control</label>
               <input type="range" id="audioVolume" value="100" max="100" class="w-full accent-amber-500 h-1 bg-slate-800 rounded cursor-pointer" />
             </div>
           </div>
@@ -710,6 +861,50 @@
     previewModal.onclick = (e) => {
       if (e.target === previewModal) closePreviewModal();
     };
+
+    // Pull to Refresh Touch Gesture
+    let ptrStartY = 0;
+    let ptrCurrentY = 0;
+    let ptrIsPulling = false;
+    const ptrIndicator = document.getElementById('ptrIndicator');
+
+    document.addEventListener('touchstart', (e) => {
+      if (window.scrollY === 0) {
+        ptrStartY = e.touches[0].clientY;
+        ptrIsPulling = true;
+      }
+    }, { passive: true });
+
+    document.addEventListener('touchmove', (e) => {
+      if (!ptrIsPulling) return;
+      ptrCurrentY = e.touches[0].clientY;
+      const diff = ptrCurrentY - ptrStartY;
+      if (diff > 0 && window.scrollY === 0) {
+        const pullDistance = Math.min(diff * 0.4, 70);
+        ptrIndicator.style.transform = `translate(-50%, ${pullDistance}px)`;
+        ptrIndicator.style.opacity = Math.min(pullDistance / 40, 1);
+      }
+    }, { passive: true });
+
+    document.addEventListener('touchend', () => {
+      if (!ptrIsPulling) return;
+      ptrIsPulling = false;
+      const diff = ptrCurrentY - ptrStartY;
+      if (diff > 55 && window.scrollY === 0) {
+        ptrIndicator.style.transform = 'translate(-50%, 50px)';
+        showToast('Refreshing drive...', 'info');
+        loadDriveData();
+        setTimeout(() => {
+          ptrIndicator.style.transform = 'translate(-50%, 0px)';
+          ptrIndicator.style.opacity = '0';
+        }, 600);
+      } else {
+        ptrIndicator.style.transform = 'translate(-50%, 0px)';
+        ptrIndicator.style.opacity = '0';
+      }
+      ptrStartY = 0;
+      ptrCurrentY = 0;
+    });
 
     // Initialize
     loadDriveData();

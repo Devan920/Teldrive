@@ -5,6 +5,8 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.webkit.ConsoleMessage
 import android.webkit.ValueCallback
@@ -22,9 +24,18 @@ import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 
 class MainActivity : AppCompatActivity() {
 
+    companion object {
+        private const val TARGET_URL = "https://teldrive-loht.onrender.com"
+        private const val MAX_RETRIES = 3
+    }
+
     private lateinit var webView: WebView
     private var swipeRefreshLayout: SwipeRefreshLayout? = null
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
+
+    private var retryCount = 0
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var retryRunnable: Runnable? = null
 
     private val fileChooserLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -59,8 +70,8 @@ class MainActivity : AppCompatActivity() {
         setupSwipeRefresh()
         setupBackNavigation()
 
-        Log.d("TelDriveWebView", "Loading URL: https://mrna-christine-ears-enb.trycloudflare.com")
-        webView.loadUrl("https://mrna-christine-ears-enb.trycloudflare.com")
+        Log.d("TelDriveWebView", "Loading URL: $TARGET_URL")
+        webView.loadUrl(TARGET_URL)
     }
 
     @Suppress("DEPRECATION")
@@ -96,6 +107,7 @@ class MainActivity : AppCompatActivity() {
                 super.onPageFinished(view, url)
                 Log.d("TelDriveWebView", "Page finished: $url")
                 swipeRefreshLayout?.isRefreshing = false
+                retryCount = 0
             }
 
             override fun onReceivedError(
@@ -105,10 +117,36 @@ class MainActivity : AppCompatActivity() {
             ) {
                 super.onReceivedError(view, request, error)
                 if (request?.isForMainFrame == true) {
-                    val desc = error?.description?.toString() ?: "Unknown error"
                     val errorCode = error?.errorCode ?: 0
+                    val desc = error?.description?.toString() ?: "Unknown error"
                     Log.e("TelDriveWebView", "Main frame error ($errorCode): $desc")
-                    Toast.makeText(this@MainActivity, "Web Error ($errorCode): $desc", Toast.LENGTH_LONG).show()
+
+                    val isNetworkOrTimeoutError = errorCode == ERROR_HOST_LOOKUP ||
+                            errorCode == ERROR_CONNECT ||
+                            errorCode == ERROR_TIMEOUT ||
+                            errorCode == ERROR_UNKNOWN
+
+                    if (isNetworkOrTimeoutError && retryCount < MAX_RETRIES) {
+                        retryCount++
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Starting cloud server, please wait... (Retry $retryCount/$MAX_RETRIES)",
+                            Toast.LENGTH_LONG
+                        ).show()
+
+                        retryRunnable?.let { mainHandler.removeCallbacks(it) }
+                        retryRunnable = Runnable {
+                            Log.d("TelDriveWebView", "Retrying loadUrl ($retryCount/$MAX_RETRIES): $TARGET_URL")
+                            webView.loadUrl(TARGET_URL)
+                        }
+                        mainHandler.postDelayed(retryRunnable!!, 5000)
+                    } else if (retryCount >= MAX_RETRIES) {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Could not connect to cloud server: $desc",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
                 }
             }
         }
@@ -146,6 +184,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupSwipeRefresh() {
         swipeRefreshLayout?.setOnRefreshListener {
+            retryCount = 0
             webView.reload()
         }
 
@@ -165,5 +204,10 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
+    }
+
+    override fun onDestroy() {
+        retryRunnable?.let { mainHandler.removeCallbacks(it) }
+        super.onDestroy()
     }
 }
