@@ -2,6 +2,7 @@ import os
 import json
 import mimetypes
 import traceback
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -33,11 +34,22 @@ if not BOT_TOKEN or not CHAT_ID:
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 FILE_DOWNLOAD_URL = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
 
-app = FastAPI(title="TelDrive")
+httpx_client: Optional[httpx.AsyncClient] = None
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global httpx_client
     await init_db()
+    httpx_client = httpx.AsyncClient(
+        http2=True,
+        limits=httpx.Limits(max_keepalive_connections=30, max_connections=60),
+        timeout=httpx.Timeout(300.0, connect=30.0)
+    )
+    yield
+    if httpx_client:
+        await httpx_client.aclose()
+
+app = FastAPI(title="TelDrive", lifespan=lifespan)
 
 # Serve static directory if it exists
 static_dir = Path(__file__).parent / "static"
@@ -83,7 +95,7 @@ async def root():
         index_file = Path(__file__).parent / "static" / "index.html"
     return HTMLResponse(content=index_file.read_text(encoding="utf-8"))
 
-# Folder Endpoints
+# Folder Management Routes
 @app.get("/folders")
 async def api_list_folders(parent_id: Optional[int] = Query(None)):
     return await list_folders(parent_id)
@@ -108,7 +120,7 @@ async def api_delete_folder(folder_id: int):
 async def api_breadcrumbs(folder_id: Optional[int] = Query(None)):
     return await get_breadcrumbs(folder_id)
 
-# Chunked Upload Endpoints
+# High-Speed Concurrent Chunked Upload Route
 @app.post("/upload-chunk")
 async def upload_chunk(
     file: UploadFile = File(...),
@@ -121,10 +133,11 @@ async def upload_chunk(
         part_filename = f"{file_uuid}_part_{chunk_index}"
         tg_url = f"{TELEGRAM_API_URL}/sendDocument"
 
-        async with httpx.AsyncClient(timeout=180.0) as client:
-            files_payload = {"document": (part_filename, content)}
-            data = {"chat_id": CHAT_ID}
-            response = await client.post(tg_url, data=data, files=files_payload)
+        files_payload = {"document": (part_filename, content)}
+        data = {"chat_id": CHAT_ID}
+
+        # Reuse global HTTP/2 connection pool
+        response = await httpx_client.post(tg_url, data=data, files=files_payload)
 
         if response.status_code != 200:
             raise HTTPException(status_code=502, detail=f"Telegram API Rejected Chunk: {response.text}")
@@ -182,7 +195,7 @@ async def save_file_metadata(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-# File Listing & Upload Fallback
+# File Listing & Single Upload Fallback
 @app.get("/files")
 async def get_files(
     search: Optional[str] = Query(None),
@@ -222,55 +235,54 @@ async def upload_file(
     results = []
     tg_url = f"{TELEGRAM_API_URL}/sendDocument"
 
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        for upload in upload_list:
-            try:
-                content = await upload.read()
-                file_size = len(content)
+    for upload in upload_list:
+        try:
+            content = await upload.read()
+            file_size = len(content)
 
-                files_payload = {"document": (upload.filename, content)}
-                data = {"chat_id": CHAT_ID}
-                response = await client.post(tg_url, data=data, files=files_payload)
+            files_payload = {"document": (upload.filename, content)}
+            data = {"chat_id": CHAT_ID}
+            response = await httpx_client.post(tg_url, data=data, files=files_payload)
 
-                if response.status_code != 200:
-                    results.append({"filename": upload.filename, "error": response.text})
-                    continue
+            if response.status_code != 200:
+                results.append({"filename": upload.filename, "error": response.text})
+                continue
 
-                res_json = response.json()
-                if not res_json.get("ok"):
-                    results.append({"filename": upload.filename, "error": res_json.get("description")})
-                    continue
+            res_json = response.json()
+            if not res_json.get("ok"):
+                results.append({"filename": upload.filename, "error": res_json.get("description")})
+                continue
 
-                msg = res_json.get("result", {})
-                file_id = None
-                if "document" in msg:
-                    file_id = msg["document"]["file_id"]
-                elif "photo" in msg:
-                    file_id = msg["photo"][-1]["file_id"]
-                elif "audio" in msg:
-                    file_id = msg["audio"]["file_id"]
-                elif "video" in msg:
-                    file_id = msg["video"]["file_id"]
+            msg = res_json.get("result", {})
+            file_id = None
+            if "document" in msg:
+                file_id = msg["document"]["file_id"]
+            elif "photo" in msg:
+                file_id = msg["photo"][-1]["file_id"]
+            elif "audio" in msg:
+                file_id = msg["audio"]["file_id"]
+            elif "video" in msg:
+                file_id = msg["video"]["file_id"]
 
-                if not file_id:
-                    results.append({"filename": upload.filename, "error": "No file_id in Telegram response"})
-                    continue
+            if not file_id:
+                results.append({"filename": upload.filename, "error": "No file_id in Telegram response"})
+                continue
 
-                chunks_json = json.dumps([file_id])
-                record_id = await add_file(upload.filename, file_id, file_size, folder_id, total_chunks=1, chunks=chunks_json)
-                results.append({
-                    "id": record_id,
-                    "filename": upload.filename,
-                    "file_size": file_size,
-                    "folder_id": folder_id,
-                    "status": "success"
-                })
-            except Exception as e:
-                results.append({"filename": upload.filename, "error": str(e)})
+            chunks_json = json.dumps([file_id])
+            record_id = await add_file(upload.filename, file_id, file_size, folder_id, total_chunks=1, chunks=chunks_json)
+            results.append({
+                "id": record_id,
+                "filename": upload.filename,
+                "file_size": file_size,
+                "folder_id": folder_id,
+                "status": "success"
+            })
+        except Exception as e:
+            results.append({"filename": upload.filename, "error": str(e)})
 
     return {"results": results, "status": "success"}
 
-# Sequential Streaming Generator for Chunked Files
+# Sequential Chunk Streaming Generator with Connection Pooling
 async def _stream_file_from_telegram(file_id: int, inline: bool):
     record = await get_file(file_id)
     if not record:
@@ -281,7 +293,6 @@ async def _stream_file_from_telegram(file_id: int, inline: bool):
     content_type = guess_content_type(filename)
     disposition = "inline" if inline else "attachment"
 
-    # Parse chunk list
     chunk_list = []
     if record.get("chunks"):
         try:
@@ -293,18 +304,17 @@ async def _stream_file_from_telegram(file_id: int, inline: bool):
         chunk_list = [record["file_id"]]
 
     async def file_iterator():
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            for tg_file_id in chunk_list:
-                resp = await client.get(f"{TELEGRAM_API_URL}/getFile", params={"file_id": tg_file_id})
-                if resp.status_code != 200 or not resp.json().get("ok"):
-                    raise HTTPException(status_code=502, detail="Failed to fetch chunk info from Telegram")
+        for tg_file_id in chunk_list:
+            resp = await httpx_client.get(f"{TELEGRAM_API_URL}/getFile", params={"file_id": tg_file_id})
+            if resp.status_code != 200 or not resp.json().get("ok"):
+                raise HTTPException(status_code=502, detail="Failed to fetch chunk info from Telegram")
 
-                file_path = resp.json()["result"]["file_path"]
-                download_url = f"{FILE_DOWNLOAD_URL}/{file_path}"
+            file_path = resp.json()["result"]["file_path"]
+            download_url = f"{FILE_DOWNLOAD_URL}/{file_path}"
 
-                async with client.stream("GET", download_url) as stream:
-                    async for chunk in stream.aiter_bytes(chunk_size=16384):
-                        yield chunk
+            async with httpx_client.stream("GET", download_url) as stream:
+                async for chunk in stream.aiter_bytes(chunk_size=16384):
+                    yield chunk
 
     headers = {
         "Content-Disposition": f'{disposition}; filename="{filename}"',

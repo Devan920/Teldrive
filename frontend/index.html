@@ -143,7 +143,7 @@
           <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
         </div>
         <p class="text-sm text-slate-300 font-medium">Drag & drop files here, or <span class="text-indigo-400 underline">browse</span></p>
-        <p class="text-xs text-slate-500">Unlimited file size support via 45MB chunking</p>
+        <p class="text-xs text-slate-500">High-speed parallel chunking (2x 20MB threads)</p>
       </div>
     </div>
     <div id="progressContainer" class="space-y-3"></div>
@@ -537,7 +537,7 @@
         .catch(() => showToast('Failed to create folder', 'error'));
     };
 
-    // Uploading with Client-Side 45MB Chunking, Progress Bar & Speed Meter
+    // Parallel Concurrent Chunked Upload Pipeline (20MB Chunks, 2 Parallel Threads)
     btnUpload.onclick = () => fileInput.click();
     dropzone.onclick = () => fileInput.click();
 
@@ -551,7 +551,8 @@
       handleUploadFiles(e.dataTransfer.files);
     });
 
-    const CHUNK_SIZE = 45 * 1024 * 1024; // 45 MB chunks
+    const CHUNK_SIZE = 20 * 1024 * 1024; // 20 MB chunks
+    const CONCURRENCY = 2; // 2 parallel uploads
 
     async function handleUploadFiles(files) {
       if (!files || files.length === 0) return;
@@ -562,13 +563,19 @@
       }
     }
 
-    function uploadSingleFileChunked(file, index) {
+    function uploadSingleFileChunked(file, fileIndex) {
       return new Promise((resolve) => {
         const fileUuid = 'uuid_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
         const totalChunks = file.size > 0 ? Math.ceil(file.size / CHUNK_SIZE) : 1;
-        const uploadedTgFileIds = [];
 
-        const pCardId = `pcard-${Date.now()}-${index}`;
+        const chunkProgress = new Array(totalChunks).fill(0);
+        const uploadedTgFileIds = new Array(totalChunks);
+        const activeChunkIndices = new Set();
+        let nextChunkIndex = 0;
+        let completedChunksCount = 0;
+        let isFailed = false;
+
+        const pCardId = `pcard-${Date.now()}-${fileIndex}`;
         const pCard = document.createElement('div');
         pCard.id = pCardId;
         pCard.className = 'glass-panel p-4 rounded-2xl space-y-3 border border-white/10 shadow-xl animate-fade-in relative overflow-hidden';
@@ -580,7 +587,10 @@
               </div>
               <div class="overflow-hidden">
                 <h4 class="text-xs font-semibold text-slate-100 truncate">${file.name}</h4>
-                <p id="bytes-${pCardId}" class="text-[10px] text-slate-400 font-mono">0 B / ${formatSize(file.size)}</p>
+                <div class="flex items-center gap-2 mt-0.5">
+                  <p id="bytes-${pCardId}" class="text-[10px] text-slate-400 font-mono">0 B / ${formatSize(file.size)}</p>
+                  <span id="status-${pCardId}" class="text-[10px] text-indigo-300 font-sans font-medium bg-indigo-500/10 px-1.5 py-0.5 rounded border border-indigo-500/20 truncate">Preparing...</span>
+                </div>
               </div>
             </div>
 
@@ -596,23 +606,66 @@
         `;
         progressContainer.appendChild(pCard);
 
-        let currentChunk = 0;
         let lastLoadedBytes = 0;
         let lastTime = Date.now();
 
-        function uploadNextChunk() {
-          if (currentChunk >= totalChunks) {
-            saveMetadata();
+        function updateGlobalProgress() {
+          const totalUploadedBytes = chunkProgress.reduce((sum, bytes) => sum + bytes, 0);
+          const overallPercent = file.size > 0 ? Math.min(100, Math.round((totalUploadedBytes / file.size) * 100)) : 100;
+
+          const now = Date.now();
+          const timeDiff = (now - lastTime) / 1000;
+
+          if (timeDiff >= 0.3 || totalUploadedBytes === file.size) {
+            const loadedDiff = totalUploadedBytes - lastLoadedBytes;
+            const bytesPerSec = timeDiff > 0 ? (loadedDiff / timeDiff) : 0;
+
+            const speedEl = document.getElementById(`speed-${pCardId}`);
+            if (speedEl) speedEl.innerText = formatSpeed(bytesPerSec);
+
+            lastLoadedBytes = totalUploadedBytes;
+            lastTime = now;
+          }
+
+          const barEl = document.getElementById(`bar-${pCardId}`);
+          if (barEl) barEl.style.width = `${overallPercent}%`;
+
+          const pctEl = document.getElementById(`pct-${pCardId}`);
+          if (pctEl) pctEl.innerText = `${overallPercent}%`;
+
+          const bytesEl = document.getElementById(`bytes-${pCardId}`);
+          if (bytesEl) bytesEl.innerText = `${formatSize(totalUploadedBytes)} / ${formatSize(file.size)}`;
+
+          // Update active status badge
+          const statusEl = document.getElementById(`status-${pCardId}`);
+          if (statusEl && activeChunkIndices.size > 0) {
+            const activeList = Array.from(activeChunkIndices).map(idx => idx + 1).sort((a, b) => a - b);
+            const chunkStr = activeList.length > 1 ? `chunks ${activeList.join(' & ')}` : `chunk ${activeList[0]}`;
+            statusEl.innerText = `Uploading ${chunkStr} of ${totalChunks}...`;
+          }
+        }
+
+        function startWorker() {
+          if (isFailed) return;
+
+          if (nextChunkIndex >= totalChunks) {
+            if (completedChunksCount === totalChunks && activeChunkIndices.size === 0) {
+              saveMetadata();
+            }
             return;
           }
 
-          const start = currentChunk * CHUNK_SIZE;
+          const chunkIndex = nextChunkIndex++;
+          activeChunkIndices.add(chunkIndex);
+
+          const start = chunkIndex * CHUNK_SIZE;
           const end = Math.min(file.size, start + CHUNK_SIZE);
           const chunkBlob = file.slice(start, end);
+          const chunkSize = end - start;
 
           const formData = new FormData();
           formData.append('file', chunkBlob, file.name);
-          formData.append('chunk_index', currentChunk);
+          formData.append('chunk_index', chunkIndex);
           formData.append('total_chunks', totalChunks);
           formData.append('file_uuid', fileUuid);
 
@@ -620,61 +673,49 @@
 
           xhr.upload.onprogress = (e) => {
             if (e.lengthComputable) {
-              const currentChunkLoaded = e.loaded;
-              const overallLoaded = Math.min(file.size, (currentChunk * CHUNK_SIZE) + currentChunkLoaded);
-              const overallPercent = file.size > 0 ? Math.round((overallLoaded / file.size) * 100) : 100;
-
-              const now = Date.now();
-              const timeDiff = (now - lastTime) / 1000;
-
-              if (timeDiff >= 0.25 || overallLoaded === file.size) {
-                const loadedDiff = overallLoaded - lastLoadedBytes;
-                const bytesPerSec = timeDiff > 0 ? (loadedDiff / timeDiff) : 0;
-
-                const speedEl = document.getElementById(`speed-${pCardId}`);
-                if (speedEl) speedEl.innerText = formatSpeed(bytesPerSec);
-
-                lastLoadedBytes = overallLoaded;
-                lastTime = now;
-              }
-
-              const barEl = document.getElementById(`bar-${pCardId}`);
-              if (barEl) barEl.style.width = `${overallPercent}%`;
-
-              const pctEl = document.getElementById(`pct-${pCardId}`);
-              if (pctEl) pctEl.innerText = `${overallPercent}%`;
-
-              const bytesEl = document.getElementById(`bytes-${pCardId}`);
-              if (bytesEl) bytesEl.innerText = `${formatSize(overallLoaded)} / ${formatSize(file.size)}`;
+              chunkProgress[chunkIndex] = e.loaded;
+              updateGlobalProgress();
             }
           };
 
           xhr.onload = () => {
+            activeChunkIndices.delete(chunkIndex);
+
             if (xhr.status >= 200 && xhr.status < 300) {
               try {
                 const res = JSON.parse(xhr.responseText);
                 if (res.tg_file_id) {
-                  uploadedTgFileIds.push(res.tg_file_id);
-                  currentChunk++;
-                  uploadNextChunk();
+                  uploadedTgFileIds[chunkIndex] = res.tg_file_id;
+                  chunkProgress[chunkIndex] = chunkSize;
+                  completedChunksCount++;
+                  updateGlobalProgress();
+
+                  // Process next chunk in pipeline
+                  startWorker();
                 } else {
-                  handleError('Missing tg_file_id from chunk upload response');
+                  handleError(`Chunk ${chunkIndex + 1} response missing file ID`);
                 }
               } catch (err) {
-                handleError('Invalid JSON from chunk response');
+                handleError(`Invalid JSON from chunk ${chunkIndex + 1}`);
               }
             } else {
-              handleError(`Chunk upload failed with status ${xhr.status}`);
+              handleError(`Chunk ${chunkIndex + 1} failed (HTTP ${xhr.status})`);
             }
           };
 
-          xhr.onerror = () => handleError('Network error during chunk upload');
+          xhr.onerror = () => {
+            activeChunkIndices.delete(chunkIndex);
+            handleError(`Network error on chunk ${chunkIndex + 1}`);
+          };
 
           xhr.open('POST', '/upload-chunk', true);
           xhr.send(formData);
         }
 
         function saveMetadata() {
+          const statusEl = document.getElementById(`status-${pCardId}`);
+          if (statusEl) statusEl.innerText = 'Saving file metadata...';
+
           const metaFd = new FormData();
           metaFd.append('file_name', file.name);
           metaFd.append('file_uuid', fileUuid);
@@ -695,6 +736,10 @@
                 speedEl.innerText = 'Completed';
                 speedEl.className = 'text-[10px] font-medium text-emerald-400 font-mono';
               }
+              if (statusEl) {
+                statusEl.innerText = 'Done!';
+                statusEl.className = 'text-[10px] text-emerald-400 font-sans font-medium bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20';
+              }
 
               showToast(`Uploaded "${file.name}"`, 'success');
               setTimeout(() => {
@@ -708,16 +753,27 @@
         }
 
         function handleError(msg) {
+          if (isFailed) return;
+          isFailed = true;
           showToast(`Error: ${msg}`, 'error');
           const speedEl = document.getElementById(`speed-${pCardId}`);
           if (speedEl) {
             speedEl.innerText = 'Failed';
             speedEl.className = 'text-[10px] font-medium text-rose-400 font-mono';
           }
+          const statusEl = document.getElementById(`status-${pCardId}`);
+          if (statusEl) {
+            statusEl.innerText = 'Failed';
+            statusEl.className = 'text-[10px] text-rose-400 font-sans font-medium bg-rose-500/10 px-1.5 py-0.5 rounded border border-rose-500/20';
+          }
           resolve();
         }
 
-        uploadNextChunk();
+        // Spawn CONCURRENCY workers
+        const numWorkers = Math.min(CONCURRENCY, totalChunks);
+        for (let w = 0; w < numWorkers; w++) {
+          startWorker();
+        }
       });
     }
 
