@@ -786,7 +786,7 @@
         .catch(() => showToast('Failed to create folder', 'error'));
     };
 
-    // Parallel Concurrent Chunked Upload Pipeline (20MB Chunks, 2 Parallel Threads)
+    // Parallel Resumable Concurrent Chunked Upload Pipeline (15MB Chunks, 3 Parallel Threads)
     fileInput.onchange = () => handleUploadFiles(fileInput.files);
 
     folderInput.onchange = () => {
@@ -810,7 +810,7 @@
     };
 
     const CHUNK_SIZE = 15 * 1024 * 1024; // 15 MB chunks
-    const CONCURRENCY = 3; // 3 parallel upload threads
+    const PARALLEL_LIMIT = 3; // 3 parallel upload threads
 
     async function handleUploadFiles(files, overrideFolderId = null) {
       if (!files || files.length === 0) return;
@@ -833,6 +833,7 @@
 
         let uploadedTgFileIds = new Array(totalChunks);
         const chunkProgress = new Array(totalChunks).fill(0);
+        const chunkRetries = new Array(totalChunks).fill(0);
 
         // Check localStorage for resumable chunk session
         const storedSessionStr = localStorage.getItem(storageKey);
@@ -844,7 +845,6 @@
               uploadedTgFileIds = session.uploadedTgFileIds;
               showToast(`Resuming upload for "${file.name}"...`, 'info');
 
-              // Pre-fill completed chunks
               for (let c = 0; c < totalChunks; c++) {
                 if (uploadedTgFileIds[c]) {
                   const cSize = (c === totalChunks - 1) ? (file.size - c * CHUNK_SIZE) : CHUNK_SIZE;
@@ -857,8 +857,15 @@
           }
         }
 
+        // Shared queue of unuploaded chunk indexes
+        const pendingQueue = [];
+        for (let c = 0; c < totalChunks; c++) {
+          if (!uploadedTgFileIds[c]) {
+            pendingQueue.push(c);
+          }
+        }
+
         const activeChunkIndices = new Set();
-        let nextChunkIndex = 0;
         let completedChunksCount = uploadedTgFileIds.filter(Boolean).length;
         let isFailed = false;
 
@@ -931,88 +938,87 @@
           const bytesEl = document.getElementById(`bytes-${pCardId}`);
           if (bytesEl) bytesEl.innerText = `${formatSize(totalUploadedBytes)} / ${formatSize(file.size)}`;
 
-          // Update active status badge
+          // Active status badge
           const statusEl = document.getElementById(`status-${pCardId}`);
           if (statusEl && activeChunkIndices.size > 0) {
             const activeList = Array.from(activeChunkIndices).map(idx => idx + 1).sort((a, b) => a - b);
-            const chunkStr = activeList.length > 1 ? `chunks ${activeList.join(' & ')}` : `chunk ${activeList[0]}`;
+            const chunkStr = activeList.length > 1 ? `chunks ${activeList.join(', ')}` : `chunk ${activeList[0]}`;
             statusEl.innerText = `Uploading ${chunkStr} of ${totalChunks}...`;
           }
         }
 
         updateGlobalProgress();
 
-        function startWorker() {
-          if (isFailed) return;
+        async function createWorker() {
+          while (pendingQueue.length > 0 && !isFailed) {
+            const chunkIndex = pendingQueue.shift();
+            activeChunkIndices.add(chunkIndex);
+            updateGlobalProgress();
 
-          // Find next unuploaded chunk index
-          while (nextChunkIndex < totalChunks && uploadedTgFileIds[nextChunkIndex]) {
-            nextChunkIndex++;
-          }
+            const start = chunkIndex * CHUNK_SIZE;
+            const end = Math.min(file.size, start + CHUNK_SIZE);
+            const chunkBlob = file.slice(start, end);
+            const chunkSize = end - start;
 
-          if (nextChunkIndex >= totalChunks) {
-            if (completedChunksCount === totalChunks && activeChunkIndices.size === 0) {
-              saveMetadata();
-            }
-            return;
-          }
+            const formData = new FormData();
+            formData.append('file', chunkBlob, file.name);
+            formData.append('chunk_index', chunkIndex);
+            formData.append('total_chunks', totalChunks);
+            formData.append('file_uuid', fileUuid);
 
-          const chunkIndex = nextChunkIndex++;
-          activeChunkIndices.add(chunkIndex);
+            try {
+              const response = await new Promise((resXhr, rejXhr) => {
+                const xhr = new XMLHttpRequest();
+                xhr.upload.onprogress = (e) => {
+                  if (e.lengthComputable) {
+                    chunkProgress[chunkIndex] = e.loaded;
+                    updateGlobalProgress();
+                  }
+                };
+                xhr.onload = () => {
+                  if (xhr.status >= 200 && xhr.status < 300) {
+                    try {
+                      const resData = JSON.parse(xhr.responseText);
+                      if (resData.tg_file_id) {
+                        resXhr(resData);
+                      } else {
+                        rejXhr(new Error('Missing file ID'));
+                      }
+                    } catch (e) {
+                      rejXhr(e);
+                    }
+                  } else {
+                    rejXhr(new Error(`HTTP ${xhr.status}`));
+                  }
+                };
+                xhr.onerror = () => rejXhr(new Error('Network error'));
+                xhr.open('POST', '/upload-chunk', true);
+                xhr.send(formData);
+              });
 
-          const start = chunkIndex * CHUNK_SIZE;
-          const end = Math.min(file.size, start + CHUNK_SIZE);
-          const chunkBlob = file.slice(start, end);
-          const chunkSize = end - start;
-
-          const formData = new FormData();
-          formData.append('file', chunkBlob, file.name);
-          formData.append('chunk_index', chunkIndex);
-          formData.append('total_chunks', totalChunks);
-          formData.append('file_uuid', fileUuid);
-
-          const xhr = new XMLHttpRequest();
-
-          xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable) {
-              chunkProgress[chunkIndex] = e.loaded;
+              uploadedTgFileIds[chunkIndex] = response.tg_file_id;
+              chunkProgress[chunkIndex] = chunkSize;
+              completedChunksCount++;
+              persistSession();
+            } catch (err) {
+              chunkProgress[chunkIndex] = 0;
+              chunkRetries[chunkIndex] = (chunkRetries[chunkIndex] || 0) + 1;
+              if (chunkRetries[chunkIndex] <= 3) {
+                pendingQueue.push(chunkIndex);
+              } else {
+                handleError(`Chunk ${chunkIndex + 1} failed after 3 retries: ${err.message}`);
+                activeChunkIndices.delete(chunkIndex);
+                return;
+              }
+            } finally {
+              activeChunkIndices.delete(chunkIndex);
               updateGlobalProgress();
             }
-          };
+          }
 
-          xhr.onload = () => {
-            activeChunkIndices.delete(chunkIndex);
-
-            if (xhr.status >= 200 && xhr.status < 300) {
-              try {
-                const res = JSON.parse(xhr.responseText);
-                if (res.tg_file_id) {
-                  uploadedTgFileIds[chunkIndex] = res.tg_file_id;
-                  chunkProgress[chunkIndex] = chunkSize;
-                  completedChunksCount++;
-                  persistSession();
-                  updateGlobalProgress();
-
-                  // Process next chunk in pipeline
-                  startWorker();
-                } else {
-                  handleError(`Chunk ${chunkIndex + 1} response missing file ID`);
-                }
-              } catch (err) {
-                handleError(`Invalid JSON from chunk ${chunkIndex + 1}`);
-              }
-            } else {
-              handleError(`Chunk ${chunkIndex + 1} failed (HTTP ${xhr.status})`);
-            }
-          };
-
-          xhr.onerror = () => {
-            activeChunkIndices.delete(chunkIndex);
-            handleError(`Network error on chunk ${chunkIndex + 1}`);
-          };
-
-          xhr.open('POST', '/upload-chunk', true);
-          xhr.send(formData);
+          if (completedChunksCount === totalChunks && activeChunkIndices.size === 0 && !isFailed) {
+            saveMetadata();
+          }
         }
 
         function saveMetadata() {
@@ -1030,7 +1036,7 @@
           fetch('/save-file-metadata', { method: 'POST', body: metaFd })
             .then(r => r.json())
             .then(res => {
-              localStorage.removeItem(storageKey); // Clear resumable state on success
+              localStorage.removeItem(storageKey);
 
               const barEl = document.getElementById(`bar-${pCardId}`);
               if (barEl) barEl.style.width = '100%';
@@ -1074,11 +1080,14 @@
           resolve();
         }
 
-        // Spawn CONCURRENCY workers
-        const numWorkers = Math.min(CONCURRENCY, totalChunks);
-        for (let w = 0; w < numWorkers; w++) {
-          startWorker();
+        // Spawn PARALLEL_LIMIT workers
+        const workers = [];
+        const workerCount = Math.min(PARALLEL_LIMIT, pendingQueue.length || 1);
+        for (let w = 0; w < workerCount; w++) {
+          workers.push(createWorker());
         }
+
+        Promise.all(workers).catch(e => handleError(e.message));
       });
     }
 
