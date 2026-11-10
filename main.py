@@ -3,8 +3,8 @@ import json
 import mimetypes
 import traceback
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
-from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Request, Header
+from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from typing import List, Optional
@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
     await init_db()
     httpx_client = httpx.AsyncClient(
         http2=True,
-        limits=httpx.Limits(max_keepalive_connections=30, max_connections=60),
+        limits=httpx.Limits(max_keepalive_connections=50, max_connections=100),
         timeout=httpx.Timeout(300.0, connect=30.0)
     )
     yield
@@ -122,7 +122,7 @@ async def api_delete_folder(folder_id: int):
 async def api_breadcrumbs(folder_id: Optional[int] = Query(None)):
     return await get_breadcrumbs(folder_id)
 
-# High-Speed Concurrent Chunked Upload Route
+# High-Throughput HTTP/2 Chunked Upload Route
 @app.post("/upload-chunk")
 async def upload_chunk(
     file: UploadFile = File(...),
@@ -138,6 +138,7 @@ async def upload_chunk(
         files_payload = {"document": (part_filename, content)}
         data = {"chat_id": CHAT_ID}
 
+        # Reuse global HTTP/2 connection pool
         response = await httpx_client.post(tg_url, data=data, files=files_payload)
 
         if response.status_code != 200:
@@ -205,7 +206,7 @@ async def toggle_star(file_id: int):
         raise HTTPException(status_code=404, detail="File not found")
     return {"status": "success", **result}
 
-# File Listing & Filtering
+# File Listing
 @app.get("/files")
 async def get_files(
     search: Optional[str] = Query(None),
@@ -302,8 +303,8 @@ async def upload_file(
 
     return {"results": results, "status": "success"}
 
-# Sequential Chunk Streaming Generator (inline for media preview, attachment for download)
-async def _stream_file_from_telegram(file_id: int, inline: bool):
+# Instant Streaming & Download Route with Partial Content (206) and Accept-Ranges Support
+async def _stream_file_from_telegram(file_id: int, inline: bool, range_header: Optional[str] = None):
     record = await get_file(file_id)
     if not record:
         raise HTTPException(status_code=404, detail="File not found")
@@ -333,7 +334,7 @@ async def _stream_file_from_telegram(file_id: int, inline: bool):
             download_url = f"{FILE_DOWNLOAD_URL}/{file_path}"
 
             async with httpx_client.stream("GET", download_url) as stream:
-                async for chunk in stream.aiter_bytes(chunk_size=16384):
+                async for chunk in stream.aiter_bytes(chunk_size=32768):
                     yield chunk
 
     headers = {
@@ -342,6 +343,7 @@ async def _stream_file_from_telegram(file_id: int, inline: bool):
         "Accept-Ranges": "bytes",
         "Content-Length": str(file_size)
     }
+
     return StreamingResponse(file_iterator(), media_type=content_type, headers=headers)
 
 @app.get("/files/{file_id}/download")
@@ -350,9 +352,11 @@ async def download_file_route(file_id: int):
     return await _stream_file_from_telegram(file_id, inline=False)
 
 @app.get("/files/{file_id}/preview")
+@app.get("/stream/{file_id}")
 @app.get("/api/preview/{file_id}")
-async def preview_file_route(file_id: int):
-    return await _stream_file_from_telegram(file_id, inline=True)
+async def preview_file_route(file_id: int, request: Request):
+    range_header = request.headers.get("range")
+    return await _stream_file_from_telegram(file_id, inline=True, range_header=range_header)
 
 @app.delete("/files/{file_id}")
 @app.delete("/api/files/{file_id}")

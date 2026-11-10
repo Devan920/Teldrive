@@ -166,7 +166,7 @@
   <!-- Expanded Speed-Dial Floating Action Menu (FAB) -->
   <div id="fabMenuContainer" class="fixed bottom-20 right-5 z-40 flex flex-col items-end gap-3 pointer-events-none">
 
-    <!-- Speed Dial Options (Hidden by default) -->
+    <!-- Speed Dial Options -->
     <div id="fabOptions" class="flex flex-col items-end gap-2.5 opacity-0 translate-y-4 pointer-events-none transition-all duration-200">
       <button id="btnFabCreateFolder" class="glass-panel text-xs text-slate-100 font-medium px-4 py-2.5 rounded-2xl border border-white/15 shadow-2xl flex items-center gap-2 hover:bg-slate-800 transition">
         <span>Create Folder</span>
@@ -274,6 +274,16 @@
     let currentFiles = [];
     let isGridView = true;
     let isFabOpen = false;
+    let activeUploadsCount = 0;
+
+    // Refresh / Navigation Guard for Active Uploads
+    window.addEventListener('beforeunload', (e) => {
+      if (activeUploadsCount > 0) {
+        e.preventDefault();
+        e.returnValue = 'Upload in progress! Are you sure you want to exit?';
+        return e.returnValue;
+      }
+    });
 
     // DOM Elements
     const fileInput = document.getElementById('fileInput');
@@ -494,10 +504,9 @@
         return;
       }
 
-      // Root Files Tab view (currentFolderId === null) shows ONLY created folders!
       if (currentFolderId === null) {
         foldersSection.classList.remove('hidden');
-        filesSection.classList.add('hidden'); // Hide files grid at root Files tab
+        filesSection.classList.add('hidden');
 
         fetch('/folders')
           .then(r => r.json())
@@ -557,7 +566,6 @@
       } else if (currentFolderId !== null) {
         params.append('folder_id', currentFolderId);
       } else {
-        // Root Files tab: render no files (folders only)
         currentFiles = [];
         renderFilesUI([]);
         return;
@@ -778,7 +786,7 @@
         .catch(() => showToast('Failed to create folder', 'error'));
     };
 
-    // Parallel Concurrent Chunked Upload Pipeline (20MB Chunks, 2 Parallel Threads)
+    // Parallel Resumable Concurrent Chunked Upload Pipeline (15MB Chunks, 3 Parallel Threads)
     fileInput.onchange = () => handleUploadFiles(fileInput.files);
 
     folderInput.onchange = () => {
@@ -801,8 +809,8 @@
         .catch(() => handleUploadFiles(files, currentFolderId));
     };
 
-    const CHUNK_SIZE = 20 * 1024 * 1024; // 20 MB chunks
-    const CONCURRENCY = 2; // 2 parallel uploads
+    const CHUNK_SIZE = 15 * 1024 * 1024; // 15 MB chunks
+    const CONCURRENCY = 3; // 3 parallel upload threads
 
     async function handleUploadFiles(files, overrideFolderId = null) {
       if (!files || files.length === 0) return;
@@ -811,20 +819,47 @@
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
+        activeUploadsCount++;
         await uploadSingleFileChunked(file, i, targetFolderId);
+        activeUploadsCount = Math.max(0, activeUploadsCount - 1);
       }
     }
 
     function uploadSingleFileChunked(file, fileIndex, targetFolderId) {
       return new Promise((resolve) => {
-        const fileUuid = 'uuid_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+        const storageKey = `teldrive_resume_${file.name}_${file.size}`;
+        let fileUuid = 'uuid_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
         const totalChunks = file.size > 0 ? Math.ceil(file.size / CHUNK_SIZE) : 1;
 
+        let uploadedTgFileIds = new Array(totalChunks);
         const chunkProgress = new Array(totalChunks).fill(0);
-        const uploadedTgFileIds = new Array(totalChunks);
+
+        // Check localStorage for resumable chunk session
+        const storedSessionStr = localStorage.getItem(storageKey);
+        if (storedSessionStr) {
+          try {
+            const session = JSON.parse(storedSessionStr);
+            if (session.fileUuid && session.totalChunks === totalChunks && Array.isArray(session.uploadedTgFileIds)) {
+              fileUuid = session.fileUuid;
+              uploadedTgFileIds = session.uploadedTgFileIds;
+              showToast(`Resuming upload for "${file.name}"...`, 'info');
+
+              // Pre-fill completed chunks
+              for (let c = 0; c < totalChunks; c++) {
+                if (uploadedTgFileIds[c]) {
+                  const cSize = (c === totalChunks - 1) ? (file.size - c * CHUNK_SIZE) : CHUNK_SIZE;
+                  chunkProgress[c] = cSize;
+                }
+              }
+            }
+          } catch (e) {
+            localStorage.removeItem(storageKey);
+          }
+        }
+
         const activeChunkIndices = new Set();
         let nextChunkIndex = 0;
-        let completedChunksCount = 0;
+        let completedChunksCount = uploadedTgFileIds.filter(Boolean).length;
         let isFailed = false;
 
         const pCardId = `pcard-${Date.now()}-${fileIndex}`;
@@ -858,8 +893,16 @@
         `;
         progressContainer.appendChild(pCard);
 
-        let lastLoadedBytes = 0;
+        let lastLoadedBytes = chunkProgress.reduce((sum, b) => sum + b, 0);
         let lastTime = Date.now();
+
+        function persistSession() {
+          localStorage.setItem(storageKey, JSON.stringify({
+            fileUuid,
+            totalChunks,
+            uploadedTgFileIds
+          }));
+        }
 
         function updateGlobalProgress() {
           const totalUploadedBytes = chunkProgress.reduce((sum, bytes) => sum + bytes, 0);
@@ -897,8 +940,15 @@
           }
         }
 
+        updateGlobalProgress();
+
         function startWorker() {
           if (isFailed) return;
+
+          // Find next unuploaded chunk index
+          while (nextChunkIndex < totalChunks && uploadedTgFileIds[nextChunkIndex]) {
+            nextChunkIndex++;
+          }
 
           if (nextChunkIndex >= totalChunks) {
             if (completedChunksCount === totalChunks && activeChunkIndices.size === 0) {
@@ -940,6 +990,7 @@
                   uploadedTgFileIds[chunkIndex] = res.tg_file_id;
                   chunkProgress[chunkIndex] = chunkSize;
                   completedChunksCount++;
+                  persistSession();
                   updateGlobalProgress();
 
                   // Process next chunk in pipeline
@@ -979,6 +1030,8 @@
           fetch('/save-file-metadata', { method: 'POST', body: metaFd })
             .then(r => r.json())
             .then(res => {
+              localStorage.removeItem(storageKey); // Clear resumable state on success
+
               const barEl = document.getElementById(`bar-${pCardId}`);
               if (barEl) barEl.style.width = '100%';
               const pctEl = document.getElementById(`pct-${pCardId}`);
@@ -1084,8 +1137,11 @@
         let zoom = 1;
         previewBody.innerHTML = `
           <div class="flex flex-col items-center justify-center gap-4 w-full h-full relative overflow-hidden">
-            <div class="overflow-auto max-h-[68vh] w-full flex items-center justify-center p-2">
-              <img id="lightboxImg" src="${previewUrl}" class="max-h-[65vh] object-contain rounded-xl shadow-2xl transition-transform duration-200 cursor-zoom-in" style="transform: scale(1)" />
+            <div class="overflow-auto max-h-[68vh] w-full flex items-center justify-center p-2 relative">
+              <div id="imgSpinner" class="absolute inset-0 flex items-center justify-center bg-slate-950/60 z-10">
+                <svg class="w-8 h-8 animate-spin text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 20v-5h-5M4 9a9 9 0 0114.85-3.36L20 7M4 17l1.15-1.36A9 9 0 0120 15"/></svg>
+              </div>
+              <img id="lightboxImg" src="${previewUrl}" class="max-h-[65vh] object-contain rounded-xl shadow-2xl transition-transform duration-200 cursor-zoom-in" style="transform: scale(1)" onload="document.getElementById('imgSpinner').remove()" />
             </div>
             <div class="glass-panel px-3 py-1.5 rounded-full flex items-center gap-3 text-xs border border-white/10">
               <button id="btnZoomOut" class="p-1 hover:text-indigo-400 transition">&minus;</button>

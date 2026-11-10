@@ -70,8 +70,12 @@ class MainActivity : AppCompatActivity() {
         setupSwipeRefresh()
         setupBackNavigation()
 
-        Log.d("TelDriveWebView", "Loading URL: $TARGET_URL")
-        webView.loadUrl(TARGET_URL)
+        if (savedInstanceState != null) {
+            webView.restoreState(savedInstanceState)
+        } else {
+            Log.d("TelDriveWebView", "Loading URL: $TARGET_URL")
+            webView.loadUrl(TARGET_URL)
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -86,6 +90,7 @@ class MainActivity : AppCompatActivity() {
             allowFileAccess = true
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             javaScriptCanOpenWindowsAutomatically = true
+            mediaPlaybackRequiresUserGesture = false
         }
     }
 
@@ -204,6 +209,22 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        webView.saveState(outState)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        webView.onResume()
+        webView.resumeTimers()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        webView.pauseTimers()
     }
 
     override fun onDestroy() {
