@@ -149,7 +149,7 @@ async def get_file(record_id: int) -> dict:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
-async def list_files(search: str = None, folder_id: int = None, is_starred: bool = False, all_files: bool = False) -> list:
+async def list_files(search: str = None, folder_id: int = None, is_starred: bool = False, all_files: bool = False, root_files_only: bool = False) -> list:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         if search and search.strip():
@@ -161,12 +161,14 @@ async def list_files(search: str = None, folder_id: int = None, is_starred: bool
         elif all_files:
             query = "SELECT * FROM files ORDER BY id DESC"
             params = ()
-        elif folder_id is None:
+        elif root_files_only:
             query = "SELECT * FROM files WHERE folder_id IS NULL ORDER BY id DESC"
             params = ()
-        else:
+        elif folder_id is not None:
             query = "SELECT * FROM files WHERE folder_id = ? ORDER BY id DESC"
             params = (folder_id,)
+        else:
+            return []
 
         async with db.execute(query, params) as cursor:
             rows = await cursor.fetchall()

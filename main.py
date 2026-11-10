@@ -102,6 +102,7 @@ async def api_list_folders(parent_id: Optional[int] = Query(None)):
     return await list_folders(parent_id)
 
 @app.post("/folders")
+@app.post("/create-folder")
 async def api_create_folder(
     name: str = Form(...),
     parent_id: Optional[int] = Form(None)
@@ -137,7 +138,6 @@ async def upload_chunk(
         files_payload = {"document": (part_filename, content)}
         data = {"chat_id": CHAT_ID}
 
-        # Reuse global HTTP/2 connection pool
         response = await httpx_client.post(tg_url, data=data, files=files_payload)
 
         if response.status_code != 200:
@@ -179,7 +179,7 @@ async def save_file_metadata(
     file_uuid: str = Form(...),
     file_size: int = Form(...),
     total_chunks: int = Form(...),
-    chunks: str = Form(...),  # JSON string array of Telegram file_ids
+    chunks: str = Form(...),
     folder_id: Optional[int] = Form(None)
 ):
     try:
@@ -205,15 +205,22 @@ async def toggle_star(file_id: int):
         raise HTTPException(status_code=404, detail="File not found")
     return {"status": "success", **result}
 
-# File Listing
+# File Listing & Filtering
 @app.get("/files")
 async def get_files(
     search: Optional[str] = Query(None),
     folder_id: Optional[int] = Query(None),
     is_starred: Optional[bool] = Query(False),
-    all_files: Optional[bool] = Query(False)
+    all_files: Optional[bool] = Query(False),
+    root_files_only: Optional[bool] = Query(False)
 ):
-    rows = await list_files(search=search, folder_id=folder_id, is_starred=is_starred, all_files=all_files)
+    rows = await list_files(
+        search=search,
+        folder_id=folder_id,
+        is_starred=is_starred,
+        all_files=all_files,
+        root_files_only=root_files_only
+    )
     files = []
     for r in rows:
         files.append({
@@ -295,7 +302,7 @@ async def upload_file(
 
     return {"results": results, "status": "success"}
 
-# Sequential Chunk Streaming Generator
+# Sequential Chunk Streaming Generator (inline for media preview, attachment for download)
 async def _stream_file_from_telegram(file_id: int, inline: bool):
     record = await get_file(file_id)
     if not record:
